@@ -13,6 +13,11 @@ dados  <-  readRDS(here::here("data","final.RDS"))
 ## primeiro resumo dos dados com glimpse 
 dados %>% glimpse()
 dados %>% head()
+dados %>% count(microrregiao) %>% arrange(desc(n))
+dados %>% count(mesorregiao) %>% arrange(desc(n))
+dados %>% count(nome_da_regiao_rural) %>% arrange(desc(n))
+dados %>% count(regiao_metropolitana) %>% arrange(desc(n))
+
 ## avaliar qualidade dos dados com skimr
 skim(dados)
 
@@ -21,16 +26,24 @@ set.seed(50)
 dados %>% 
   create_report(., y = "credito")
 
+dados %>% 
+  filter(credito > 0) %>% 
+  create_report(., y = "credito")
+
 ## EDA automática com xray
 dados %>% 
+  filter(credito > 0) %>% 
   make_xray() %>% 
   view_xray()
 ## EDA automática com 
-dados %>% explore() 
+dados %>% 
+  filter(credito > 0) %>% 
+  explore() 
 
 ## análise de correlação
 dados %>% 
-  select(-1) %>% 
+  select_if(is.numeric) %>% 
+  filter(credito > 0) %>% 
   cor() %>% 
   ggcorrplot(
     type = "lower",
@@ -53,3 +66,7 @@ dados %>%
   binarize(n_bins = 2) %>% 
   correlate(target = credito__7244782_Inf) %>% 
   plot_correlation_funnel(interactive = TRUE)
+
+
+
+
