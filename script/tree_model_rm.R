@@ -117,6 +117,12 @@ predict(
   my_df_fit$.workflow[[1]],
   my_df_complete
 )
+pred_df_complete <- 
+cbind(my_df_complete$cod_ibge,
+      my_df_complete$uf,
+      pred_df_complete,
+      my_df_complete$credito) 
+colnames(pred_df_complete) <-  c("cod_ibge","uf","previsao","credito")
 pred_df_complete %>% 
   saveRDS(here::here("artifacts","pred_df_complete.RDS"))
 
