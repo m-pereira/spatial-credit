@@ -2,7 +2,6 @@ library(tidyverse)
 library(tidymodels)
 ### carregar os dados
 my_df_complete  <-  readRDS(here::here("data","final.RDS"))
-
 my_df <- 
   my_df_complete %>% 
   filter(credito > 0) %>%
