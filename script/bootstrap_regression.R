@@ -11,27 +11,35 @@ library(tidymodels)
 library(workboots)
 
 ### carregar os dados
-my_df_complete  <-  readRDS(here::here("data","final.RDS"))
+my_df_complete  <-  readRDS(here::here("data","final.RDS")) %>% 
+  mutate(cat_pop = ifelse(pop_est < 30000, "menor 30k" , "mais 30k"))
 
+my_df_complete %>% glimpse()
 my_df <- 
   my_df_complete %>% 
   filter(credito > 0) %>% 
-  select(-cod_ibge, -uf,-municipio)
-
+  select(-cod_ibge, -uf,-municipio) 
+my_df %>% names()
 # my_df <- 
 # my_df %>% 
 #   select(-mesorregiao,-microrregiao)
 
 ### initial split------------------
 set.seed(458)
-my_df_split <- initial_split(my_df, prop = 0.7)
+my_df_split <- initial_split(my_df, prop = 0.7,
+                             strata = cat_pop)
 my_df_split
 ## in case you want use bootstrap bootstrap
-boots_folds <- bootstraps(training(my_df_split), times = 1e3, apparent = TRUE)
+boots_folds <- bootstraps(training(my_df_split), times = 50, apparent = TRUE,
+                          strata = cat_pop)
 boots_folds
 ## recipe-------------------
 boots_recipe <-
   recipe(formula = credito ~ ., data = training(my_df_split)) %>%
+  step_interact(
+    term = ~ pop_est:pib_prc_corr
+  ) %>% 
+  step_poly(pop_est, total_frota) %>% 
   step_nzv(all_numeric_predictors()) %>% 
   step_normalize(all_numeric_predictors()) %>% 
   step_corr(all_numeric_predictors(),threshold = 0.9) %>% 
@@ -42,6 +50,9 @@ boots_recipe <-
 
 boots_recipe %>% prep() %>% 
   bake(my_df_split) %>% glimpse()
+col_names <- 
+  boots_recipe %>% prep() %>% 
+  bake(my_df_split) %>% names()
 
 boots_recipe %>% prep() %>% 
   bake(my_df_split) %>% ncol()
@@ -58,119 +69,145 @@ boots_spec <-
   set_engine("glmnet")
 
 ##workflow----------------------
-boots_workflow <-
-  workflow() %>%
-  add_recipe(boots_recipe) %>%
-  add_model(boots_spec)
-boots_workflow
+formula <-  credito ~.
+boots_spec <-
+  linear_reg() %>% 
+  set_mode("regression") %>% 
+  set_engine("lm")
 
-
-## tune grid------------------
-set.seed(7785)
-
-boots_grid <- grid_latin_hypercube(
-  penalty(range = c(-10, 0), trans = log10_trans()), 
-  mixture(range = c(0, 1), trans = NULL),
-  size = 10)
-
-boots_grid
-set.seed(7785)
-doParallel::registerDoParallel()
-
-boots_tune <-
-  tune_grid(boots_workflow,
-            boots_folds,
-            grid = boots_grid,
-            metrics = 
-              metric_set(
-                rsq,
-                rmse, # traditional
-                huber_loss, # menos sensivel a outliers ao rmse
-                ccc, # Concordance correlation coefficient sensível a outleirs
-                iic,  # mede a correlação ideal
-                rpiq,rpd # medem consistency/correlation não acurácia
-              )
+my_model <- 
+  boots_folds %>% 
+  mutate(
+    processed = map(splits, ~juice(prep(boots_recipe,training(.)))),
+    model = map(processed, ~fit(linear_reg(),formula,data =.)),
+    coefs = map(model,~tidy(.)),
+    .pred = map2(model,processed, ~predict(.x,new_data = .y)),
+    .rmse = map2_dbl(processed,.pred,~rmse_vec(.x$credito,.y$.pred)),
+    glance = map(model,broom::glance),
+    .rsq = glance %>% map_dbl("r.squared"),
+    .adj_rsq = glance %>% map_dbl("adj.r.squared")
   )
-# show_notes(.Last.tune.result)
-boots_tune
-### show best ------------------------
-show_best(boots_tune,metric = "rmse")
-show_best(boots_tune,metric = "rsq")
-show_best(boots_tune,metric = "ccc")
-show_best(boots_tune,metric = "huber_loss")
-show_best(boots_tune,metric = "icc")
-show_best(boots_tune,metric = "ccc")
-show_best(boots_tune,metric = "rpiq")
-show_best(boots_tune,metric = "rpd")
 
-autoplot(boots_tune)
-## finalize workflow---------------
-# boots_workflow %>% 
-#   fit_resamples(
-#     resamples = boots_folds,
-#     control = control_resamples(save_pred = TRUE)
-#   )
+my_model %>% glimpse()
+my_model %>% select(
+  .rsq, .adj_rsq
+) %>% 
+  pivot_longer(everything()) %>% 
+  group_by(name) %>% 
+  summarise(
+    mediana = median(value),
+    media = mean(value),
+    conf025 = quantile(value,0.025),
+    conf975 = quantile(value, 0.975)
+  )
 
-final_boots <- boots_workflow %>%
-  finalize_workflow(select_best(boots_tune,metric = "rmse"))
-final_boots
+## coefs ---------------------------------------
+my_model %>% 
+  select(coefs) %>% 
+  unnest(coefs) %>% 
+  distinct(term)
 
-## last fit----------------------
-my_df_fit <- last_fit(final_boots, my_df_split)
-my_df_fit_v <- fit(final_boots, testing(my_df_split))
+my_model %>% 
+  select(coefs) %>% 
+  unnest(coefs) %>% 
+  select(term,estimate) %>% 
+  filter(term %in% c("pib_pc","vab_agro",
+                     "vab_ind",
+                     "area_plantada_temp")) %>% 
+  ggplot(aes(x = estimate)) +
+  geom_histogram()+
+  facet_wrap(~term, scales = "free")
 
+boots_medias <- 
+  my_model %>% 
+  select(coefs) %>% 
+  unnest(coefs) %>% 
+  group_by(term) %>% 
+  summarise(
+    med_est = median(estimate),
+    p.value = median(p.value)
+  )
 
-my_df_fit
-#saveRDS(my_df_fit,here::here("artifacts","wkflw.RDS"))
+library(ggrepel)
+boots_medias %>% 
+  filter(term != "(Intercept)") %>% 
+  ggplot(aes(x=med_est, y = term, label = p.value))+
+  geom_vline(
+    xintercept = 0,lty=2,size=1.5,alpha=0.7,color="gray50"
+  )+
+  geom_point(
+    alpha = 0.8,size=2.5,show.legend = FALSE
+  )+
+  theme_light(base_family = "IBMPlexSans") +
+  labs(x = "coeficiente")
 
-collect_metrics(my_df_fit)
-predict(
-  my_df_fit$.workflow[[1]],
-  slice_tail(testing(my_df_split),n=20))
-predict(
-  my_df_fit$.workflow[[1]],
-  slice_head(testing(my_df_split),n=20))
+### testing data ----------------------------
+add_cols <- function(df,cols) {
+  add <- cols[!cols %in% names(df)]
+  if(length(add)!= 0) df[add] <- 0
+  return(df)
+}
 
+my_model_testing <- 
+  my_model %>% 
+  mutate(
+    testing_processed = map(splits, ~juice(prep(boots_recipe,testing(.)))),
+    col_names = map(processed,names),
+    testing_processed = map2(testing_processed,col_names,
+                             ~add_cols(.x,.y)),
+    .pred_test = map2(model, testing_processed, ~predict(.x,new_data=.y)),
+    .rmse_test = map2_dbl(testing_processed,.pred_test, ~rmse_vec(.x$credito,.y$.pred)),
+    .rsq_test = map2_dbl(testing_processed,.pred_test, ~rsq_vec(.x$credito,.y$.pred))
+  )
+my_model
 
-## understand the model--------------------
-my_flw <- my_df_fit %>% extract_workflow() 
-final_fitted <- my_df_fit$.workflow[[1]]
-predict(final_fitted, my_df[10:12, ])
+my_model_testing %>% select(
+  .rsq_test, .rmse_test
+) %>% 
+  pivot_longer(everything()) %>% 
+  group_by(name) %>% 
+  summarise(
+    mediana = median(value),
+    media = mean(value),
+    conf025 = quantile(value,0.025),
+    conf975 = quantile(value, 0.975)
+  )
+  
+## forecasting -------------------------
+my_model_forecast <- 
+  tibble(
+    my_model_forecast,
+    data = list(my_df_complete)
+  )
+my_model_forecast %>% names()
+my_model_forecast <- 
+  my_model_forecast %>% 
+  mutate(
+    data_processed = map(data, ~juice(prep(boots_recipe,.))),
+    #col_names = map(processed,names),
+    data_processed = map2(data_processed,col_names,
+                             ~add_cols(.x,.y)),
+    .pred_forecast = map2(model, data_processed, ~predict(.x,new_data=.y))
+  )
+my_model_forecast <- 
+  my_model_forecast %>% 
+  mutate(
+    .pred_forecast = map(.pred_forecast, ~cbind(.x,my_df_complete$cod_ibge))
+  )
+my_df_forecast <- 
+my_model_forecast %>% 
+  select(.pred_forecast) %>% 
+  unnest(.pred_forecast)
+names(my_df_forecast) <- c(".pred","ibge")
+my_forecast <- 
+my_df_forecast %>% 
+  group_by(ibge) %>% 
+  summarise(
+    .pred_mean = mean(.pred),
+    .pred_median = median(.pred),
+    .pred_0.25 = quantile(.pred,0.025),
+    .pred_0.975 = quantile(.pred,0.975)
+    
+  )
+my_forecast
 
-library(rpart.plot)
-rpart.plot(my_flw$fit)
-
-library(vip)
-my_df_fit %>% 
-  extract_fit_parsnip() %>% 
-  vip(aesthetics = list(alpha = 0.8, fill = "midnightblue"))
-
-library(DALEXtra)
-final_fitted <- my_df_fit$.workflow[[1]]
-predict(final_fitted, my_df[10:12, ])
-
-boots_explainer <- explain_tidymodels(
-  final_fitted,
-  data = dplyr::select(testing(my_df_split),
-                       -credito),
-  y = dplyr::select(training(my_df_split),
-                    credito),
-  verbose = FALSE
-)
-
-library(modelStudio)
-new_observation <- testing(my_df_split) %>% slice_head()
-modelStudio(boots_explainer, new_observation)
-library(modelDown)
-## save the model------------------
-# library(vetiver)
-# v <- my_df_fit %>%
-#   extract_workflow() %>%
-#   vetiver_model(model_name = "boots-v1")
-# v
-# library(pins)
-# board <- board_temp(versioned = TRUE)
-# board %>% vetiver_pin_write(v)
-# vetiver_write_plumber(board, "credit-risk", 
-#                       rsconnect = FALSE)
-# vetiver_write_docker(v)
